@@ -183,6 +183,8 @@ def init_session_state():
             st.session_state.mode = "manual"
         if 'current_operation' not in st.session_state:
             st.session_state.current_operation = "merge"
+        if 'saved_max_rows' not in st.session_state:
+            st.session_state.saved_max_rows = None
     except Exception as e:
         # エラーが発生した場合は静かに処理
         pass
@@ -352,6 +354,8 @@ def main():
                         <h4>📋 {selected_template}</h4>
                         <p><strong>説明:</strong> {template_info['description'] or 'なし'}</p>
                         <p><small><strong>作成日時:</strong> {template_info['created_at']}</small></p>
+                        <p><small><strong>選択列数:</strong> {len(template_info['config']['selected_columns'])}</small></p>
+                        {f'<p><small><strong>行数設定:</strong> {template_info["config"].get("max_rows_per_file", "なし")}行/ファイル</small></p>' if template_info["config"].get("max_rows_per_file") else ''}
                     </div>
                     ''', unsafe_allow_html=True)
                     
@@ -363,6 +367,11 @@ def main():
                                 st.session_state.df = df
                                 st.session_state.column_order = column_order
                                 st.session_state.selected_columns = selected_columns
+                                
+                                # 行数設定も適用
+                                if template_info['config'].get('max_rows_per_file'):
+                                    st.session_state.saved_max_rows = template_info['config']['max_rows_per_file']
+                                
                                 st.success("✅ テンプレートを適用しました")
                                 st.rerun()
             
@@ -643,6 +652,15 @@ def main():
                 with col1:
                     template_name = st.text_input("テンプレート名", placeholder="例: 月次売上レポート", key="template_name")
                     template_description = st.text_area("説明（任意）", placeholder="例: 毎月の売上データから必要な列を抽出", key="template_desc")
+                    
+                    # 行数指定設定も保存
+                    save_max_rows = st.number_input(
+                        "保存する行数設定（任意）",
+                        min_value=0,
+                        max_value=100000,
+                        value=0,
+                        help="0 = 行数設定を保存しない"
+                    )
                 
                 with col2:
                     st.write("")
@@ -655,7 +673,8 @@ def main():
                                 'description': template_description,
                                 'merge_operations': [],
                                 'split_operations': [],
-                                'empty_columns': []
+                                'empty_columns': [],
+                                'max_rows_per_file': save_max_rows if save_max_rows > 0 else None
                             }
                             save_template(template_name, config)
                             st.success(f"✅ テンプレート '{template_name}' を保存しました")
@@ -706,22 +725,96 @@ def main():
                 </div>
                 ''', unsafe_allow_html=True)
             with col4:
-                # ダウンロードボタン
-                try:
-                    csv_data = final_df.to_csv(index=False).encode('utf-8-sig')
-                    original_name = uploaded_file.name.split('.')[0]
+                # 行数指定機能
+                with st.expander("📁 ファイル分割設定", expanded=False):
+                    st.markdown("**行数指定でファイルを分割して出力**")
                     
-                    st.download_button(
-                        label="📥 CSV\nダウンロード",
-                        data=csv_data,
-                        file_name=f"processed_{original_name}.csv",
-                        mime="text/csv",
-                        type="primary",
-                        key="download_btn",
-                        use_container_width=True
-                    )
-                except Exception as e:
-                    st.error(f"❌ ダウンロード用データの準備でエラーが発生しました: {str(e)}")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        default_rows = st.session_state.saved_max_rows if st.session_state.saved_max_rows else 1000
+                        max_rows_per_file = st.number_input(
+                            "1ファイルあたりの最大行数",
+                            min_value=1,
+                            max_value=100000,
+                            value=default_rows,
+                            help="例: 2000行を指定すると、5000行のデータは3つのファイルに分割されます"
+                        )
+                    
+                    with col_b:
+                        st.write("")
+                        st.write("")
+                        if max_rows_per_file > 0:
+                            total_files = (len(final_df) + max_rows_per_file - 1) // max_rows_per_file
+                            st.markdown(f"**分割ファイル数: {total_files}個**")
+                    
+                    # ファイル分割ダウンロード
+                    if st.button("📦 分割ファイルダウンロード", type="primary", use_container_width=True):
+                        if max_rows_per_file > 0:
+                            try:
+                                # ファイル分割処理
+                                total_rows = len(final_df)
+                                total_files = (total_rows + max_rows_per_file - 1) // max_rows_per_file
+                                
+                                # ZIPファイル作成
+                                import zipfile
+                                import io
+                                
+                                zip_buffer = io.BytesIO()
+                                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                                    original_name = uploaded_file.name.split('.')[0]
+                                    
+                                    for i in range(total_files):
+                                        start_idx = i * max_rows_per_file
+                                        end_idx = min((i + 1) * max_rows_per_file, total_rows)
+                                        
+                                        # 分割データフレーム
+                                        split_df = final_df.iloc[start_idx:end_idx]
+                                        
+                                        # CSVデータを作成
+                                        csv_data = split_df.to_csv(index=False).encode('utf-8-sig')
+                                        
+                                        # ファイル名を生成
+                                        if total_files == 1:
+                                            filename = f"{original_name}_processed.csv"
+                                        else:
+                                            filename = f"{original_name}_processed_part{i+1:03d}_of_{total_files:03d}.csv"
+                                        
+                                        # ZIPに追加
+                                        zip_file.writestr(filename, csv_data)
+                                
+                                # ZIPファイルをダウンロード
+                                zip_buffer.seek(0)
+                                st.download_button(
+                                    label=f"📦 分割ファイルZIPダウンロード ({total_files}個のファイル)",
+                                    data=zip_buffer.getvalue(),
+                                    file_name=f"{original_name}_processed_split.zip",
+                                    mime="application/zip",
+                                    type="secondary",
+                                    key="download_split_zip",
+                                    use_container_width=True
+                                )
+                                
+                                st.success(f"✅ {total_files}個のファイルに分割しました")
+                                
+                            except Exception as e:
+                                st.error(f"❌ ファイル分割でエラーが発生しました: {str(e)}")
+            
+            # 通常のダウンロードボタン
+            try:
+                csv_data = final_df.to_csv(index=False).encode('utf-8-sig')
+                original_name = uploaded_file.name.split('.')[0]
+                
+                st.download_button(
+                    label="📥 CSV\nダウンロード",
+                    data=csv_data,
+                    file_name=f"processed_{original_name}.csv",
+                    mime="text/csv",
+                    type="primary",
+                    key="download_btn",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"❌ ダウンロード用データの準備でエラーが発生しました: {str(e)}")
             
             # プレビュー表示
             st.markdown('<div class="preview-table">', unsafe_allow_html=True)
