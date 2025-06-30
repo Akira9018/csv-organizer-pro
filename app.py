@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import json
+import zipfile
 from datetime import datetime
 
 # ページ設定
@@ -756,9 +757,6 @@ def main():
                                 total_files = (total_rows + max_rows_per_file - 1) // max_rows_per_file
                                 
                                 # ZIPファイル作成
-                                import zipfile
-                                import io
-                                
                                 zip_buffer = io.BytesIO()
                                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                                     original_name = uploaded_file.name.split('.')[0]
